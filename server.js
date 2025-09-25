@@ -77,7 +77,7 @@ function getTuyaHeaders(path, method = 'GET', body = {}) {
 // API Routes
 app.post('/api/login', async (req, res) => {
     try {
-        const { username, password, countryCode = '1', schema = 'smartlife' } = req.body;
+        const { username, password, countryCode = '49', schema = 'smartlife' } = req.body;
         
         console.log(`🔐 Login attempt for: ${username}`);
         
