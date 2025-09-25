@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -51,8 +52,7 @@ const userSessions = new Map();
  *  ------------------------- */
 
 // sha256 hex helper
-import url from 'url';
-import crypto from 'crypto';
+
 
 // sha256 hex helper
 const sha256hex = (s = '') =>
@@ -75,7 +75,7 @@ function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessTok
   const secret = process.env.TUYA_CLIENT_SECRET;
 
   // Only sign PATH + QUERY (no host)
-  const u = new url.URL(path, baseUrl);
+  const u = new URL(path, baseUrl);;
   const pathWithQuery = u.pathname + (u.search || '');
 
   const stringToSign = buildStringToSign(method, pathWithQuery, body || {});
