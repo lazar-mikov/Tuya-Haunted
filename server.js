@@ -52,51 +52,37 @@ const userSessions = new Map();
  *  ------------------------- */
 
 // sha256 hex helper
+import url from 'url';
+import crypto from 'crypto';
+
+// sha256 hex helper
 const sha256hex = (s = '') =>
   crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
-// Build Tuya v2 stringToSign
-function buildStringToSign(method, pathWithQuery, headers, bodyObj) {
+// Build Tuya v2 stringToSign WITHOUT signed headers.
+// This intentionally puts a BLANK line for the headers section.
+function buildStringToSign(method, pathWithQuery, bodyObj) {
   const httpMethod = method.toUpperCase();
   const bodyStr = bodyObj && Object.keys(bodyObj).length ? JSON.stringify(bodyObj) : '';
   const contentSha256 = sha256hex(bodyStr);
-
-  // canonical headers included in signature; include content-type for JSON
-  const signedHeaderKeys = ['content-type'];
-  const canonicalHeaders = signedHeaderKeys
-    .filter(k => headers[k] || headers[k.toLowerCase()])
-    .map(k => `${k.toLowerCase()}:${(headers[k] || headers[k.toLowerCase()]).toString().trim()}`)
-    .sort()
-    .join('\n'); // may be empty string
-
-  // Sections are joined with newlines; even empty header section gets a line
-  return [httpMethod, contentSha256, canonicalHeaders, pathWithQuery].join('\n');
+  // Join parts with '\n'. The empty string below becomes a blank line.
+  return [httpMethod, contentSha256, '', pathWithQuery].join('\n');
 }
 
-/**
- * Sign any Tuya request.
- * For token/login (no access token): preSign = client_id + t + nonce + stringToSign
- * For service APIs (with access token): preSign = client_id + access_token + t + nonce + stringToSign
- */
 function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessToken = '' }) {
-  const t = Date.now().toString(); // 13-digit ms timestamp
+  const t = Date.now().toString();          // 13-digit ms timestamp
   const nonce = crypto.randomUUID();
   const client_id = process.env.TUYA_CLIENT_ID;
   const secret = process.env.TUYA_CLIENT_SECRET;
 
-  // Only path + query go into the signature, not the host
+  // Only sign PATH + QUERY (no host)
   const u = new url.URL(path, baseUrl);
   const pathWithQuery = u.pathname + (u.search || '');
 
-  const headersForSign = { 'content-type': 'application/json' };
-  const stringToSign = buildStringToSign(method, pathWithQuery, headersForSign, body || {});
+  const stringToSign = buildStringToSign(method, pathWithQuery, body || {});
   const preSign = client_id + (accessToken || '') + t + nonce + stringToSign;
 
-  const sign = crypto
-    .createHmac('sha256', secret)
-    .update(preSign, 'utf8')
-    .digest('hex')
-    .toUpperCase();
+  const sign = crypto.createHmac('sha256', secret).update(preSign, 'utf8').digest('hex').toUpperCase();
 
   const headers = {
     'client_id': client_id,
@@ -110,6 +96,7 @@ function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessTok
 
   return headers;
 }
+
 
 /** -------------------------
  *  API routes
