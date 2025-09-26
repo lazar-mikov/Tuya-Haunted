@@ -136,6 +136,9 @@ app.post('/api/login', async (req, res) => {
       // Phone login path (if username is not an email)
       { label: 'E: phone + SHA256 + country_code', body: { username, password: sha, schema, country_code: String(countryCode) }, cond: !asEmail },
       { label: 'F: phone + PLAINTEXT + country_code', body: { username, password, schema, country_code: String(countryCode) }, cond: !asEmail },
+       { label: 'G: email + MD5', body: { username, password: md5hex(password), schema, country_code: '49' }, cond: asEmail },
+  { label: 'H: phone + MD5', body: { username, password: md5hex(password), schema, country_code: '49' }, cond: !asEmail },
+
     ].filter(x => x.cond);
 
     const tryOnce = async (body, label) => {
@@ -346,6 +349,28 @@ async function controlAllDevices(sessionData, commands) {
 
   return Promise.all(promises);
 }
+
+app.post('/api/debug-login', async (req, res) => {
+  const { username, password } = req.body;
+  
+  const sha256 = crypto.createHash('sha256').update(password).digest('hex');
+  const md5 = crypto.createHash('md5').update(password).digest('hex');
+  
+  res.json({
+    env: {
+      baseUrl: process.env.TUYA_BASE_URL,
+      hasClientId: !!process.env.TUYA_CLIENT_ID,
+      clientIdStart: process.env.TUYA_CLIENT_ID?.substring(0, 4),
+      countryCode: process.env.TUYA_COUNTRY_CODE
+    },
+    attempts: {
+      username,
+      sha256Hash: sha256.substring(0, 8) + '...',
+      md5Hash: md5.substring(0, 8) + '...',
+      isEmail: username.includes('@')
+    }
+  });
+});
 
 /** -------------------------
  *  Health & debug
