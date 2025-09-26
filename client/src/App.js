@@ -18,6 +18,17 @@ function App() {
         setIsLoggedIn(true);
     };
 
+    useEffect(() => {
+  // Check if returning from OAuth
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('auth') === 'success') {
+    // User is logged in, discover devices
+    tuyaService.discoverDevices().then(devices => {
+      handleLoginSuccess(devices);
+    });
+  }
+}, []);
+
     const toggleDevice = (deviceId) => {
         if (selectedDevices.includes(deviceId)) {
             setSelectedDevices(selectedDevices.filter(id => id !== deviceId));

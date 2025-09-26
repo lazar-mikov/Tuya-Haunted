@@ -192,21 +192,62 @@ app.post('/api/login', async (req, res) => {
  * Uses users/{uid}/devices, signed with access_token
  */
 
-// Generate auth URL for users
+// server.js - OAuth endpoints
 app.get('/api/smart-life-auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   req.session.authState = state;
   
-  const params = new URLSearchParams({
-    client_id: process.env.TUYA_CLIENT_ID,
-    response_type: 'code',
-    redirect_uri: 'https://tuya-haunted-production.up.railway.app/api/auth-callback',
-    state: state,
-    schema: 'smart-life'
-  });
+  // Build Tuya OAuth URL
+  const oauthUrl = new URL('https://openapi.tuyaeu.com/oauth/authorize');
+  oauthUrl.searchParams.set('client_id', process.env.TUYA_CLIENT_ID);
+  oauthUrl.searchParams.set('response_type', 'code');
+  oauthUrl.searchParams.set('redirect_uri', `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`);
+  oauthUrl.searchParams.set('state', state);
   
-  // Redirect to Tuya's auth page
-  res.redirect(`https://openapi.tuyaeu.com/oauth/authorize?${params}`);
+  console.log('Redirecting to:', oauthUrl.toString());
+  res.redirect(oauthUrl.toString());
+});
+
+app.get('/api/auth-callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    
+    if (!code) {
+      throw new Error('No authorization code received');
+    }
+    
+    // Exchange code for token
+    const baseUrl = process.env.TUYA_BASE_URL;
+    const tokenPath = `/v1.0/token?code=${code}&grant_type=authorization_code`;
+    
+    const headers = signTuyaRequest({
+      baseUrl,
+      path: tokenPath,
+      method: 'GET'
+    });
+    
+    const response = await axios.get(baseUrl + tokenPath, { headers });
+    
+    if (response.data.success) {
+      const { access_token, refresh_token, uid } = response.data.result;
+      
+      userSessions.set(req.sessionID, {
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        uid: uid
+      });
+      
+      req.session.authenticated = true;
+      
+      // Redirect to React app with success
+      res.redirect('/?auth=success');
+    } else {
+      throw new Error(response.data.msg);
+    }
+  } catch (error) {
+    console.error('OAuth callback error:', error);
+    res.redirect('/?auth=failed&error=' + encodeURIComponent(error.message));
+  }
 });
 
 // Handle callback
@@ -246,7 +287,14 @@ app.get('/api/auth-callback', async (req, res) => {
   }
 });
 
-
+app.get('/api/debug-oauth', (req, res) => {
+  res.json({
+    clientId: process.env.TUYA_CLIENT_ID,
+    baseUrl: process.env.TUYA_BASE_URL,
+    appUrl: process.env.APP_URL || 'not set',
+    redirectUri: `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`
+  });
+});
 
 app.post('/api/discover', async (req, res) => {
   try {

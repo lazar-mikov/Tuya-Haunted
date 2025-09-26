@@ -33,7 +33,8 @@ const LoginScreen = ({ onLoginSuccess }) => {
     //        setLoading(false);
        // }
 
-         window.location.href = '/api/smart-life-auth';
+          const baseUrl = window.location.origin;
+  window.location.href = `${baseUrl}/api/smart-life-auth`;
 
     };
 
