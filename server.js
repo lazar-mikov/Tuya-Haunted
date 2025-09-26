@@ -112,90 +112,105 @@ function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessTok
  */
 app.post('/api/login', async (req, res) => {
   try {
-    const {
-      username,
-      password,
-      countryCode = process.env.TUYA_COUNTRY_CODE || '49',
-      schema = process.env.TUYA_SCHEMA || 'smartlife'
-    } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'username and password required' });
+    const { username, password, countryCode = '49' } = req.body;
+    
+    const baseUrl = process.env.TUYA_BASE_URL;
+    
+    // Get app access token first
+    const tokenPath = '/v1.0/token?grant_type=1';
+    const tokenHeaders = signTuyaRequest({
+      baseUrl,
+      path: tokenPath,
+      method: 'GET'
+    });
+    
+    const tokenResp = await axios.get(baseUrl + tokenPath, { headers: tokenHeaders });
+    if (!tokenResp.data.success) {
+      throw new Error('Failed to get app token');
     }
-
-    const baseUrl = process.env.TUYA_BASE_URL; // e.g. https://openapi.tuyaeu.com
-    const loginPath = '/v1.0/iot-03/users/login';
-
-    const sha = crypto.createHash('sha256').update(password, 'utf8').digest('hex'); // lowercase
-    const asEmail = String(username).includes('@');
-
-    // Build the 4 variants we’ll try in order (most common first)
-    const attempts = [
-      { label: 'A: email + SHA256, no country_code', body: { username, password: sha, schema }, cond: asEmail },
-      { label: 'B: email + SHA256, with country_code', body: { username, password: sha, schema, country_code: String(countryCode) }, cond: asEmail },
-      { label: 'C: email + PLAINTEXT, no country_code', body: { username, password, schema }, cond: asEmail },
-      { label: 'D: email + PLAINTEXT, with country_code', body: { username, password, schema, country_code: String(countryCode) }, cond: asEmail },
-      // Phone login path (if username is not an email)
-      { label: 'E: phone + SHA256 + country_code', body: { username, password: sha, schema, country_code: String(countryCode) }, cond: !asEmail },
-      { label: 'F: phone + PLAINTEXT + country_code', body: { username, password, schema, country_code: String(countryCode) }, cond: !asEmail },
-       { label: 'G: email + MD5', body: { username, password: md5hex(password), schema, country_code: '49' }, cond: asEmail },
-  { label: 'H: phone + MD5', body: { username, password: md5hex(password), schema, country_code: '49' }, cond: !asEmail },
-
-    ].filter(x => x.cond);
-
-    const tryOnce = async (body, label) => {
-      const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // <- your existing signer
-      const r = await axios.post(baseUrl + loginPath, body, { headers, timeout: 10000 });
-      if (!r.data?.success) {
-        const e = new Error(r.data?.msg || 'Login failed');
-        e.code = r.data?.code;
-        e.data = r.data;
-        throw e;
-      }
-      return { result: r.data.result, label };
+    
+    const appToken = tokenResp.data.result.access_token;
+    
+    // Use the HOME MANAGEMENT API (this is under Smart Home Basic Service)
+    const homePath = '/v1.0/home/login';
+    const loginBody = {
+      username,  // email or phone
+      password,  // plaintext - Tuya will hash it
+      country_code: countryCode,
+      application_name: 'smart_life'  // Critical for Smart Life users
     };
-
-    let out = null, lastErr = null;
-    for (const a of attempts) {
-      try {
-        console.log('[LOGIN attempt]', a.label, { schema, cc: a.body.country_code ? 'set' : 'omitted' });
-        out = await tryOnce(a.body, a.label);
-        break;
-      } catch (e) {
-        lastErr = e;
-        console.warn('[LOGIN failed]', a.label, e.code, e.message);
-      }
-    }
-
-    if (!out) {
-      return res.status(400).json({
-        success: false,
-        error: lastErr?.data?.msg || lastErr?.message || 'Login failed',
-        code: lastErr?.code || null
+    
+    const loginHeaders = signTuyaRequest({
+      baseUrl,
+      path: homePath,
+      method: 'POST',
+      body: loginBody,
+      accessToken: appToken
+    });
+    
+    const loginResp = await axios.post(
+      baseUrl + homePath,
+      loginBody,
+      { headers: loginHeaders }
+    );
+    
+    if (!loginResp.data.success) {
+      // If home/login fails, try users/login
+      const usersPath = '/v1.0/users/login';
+      const usersBody = {
+        username,
+        password,
+        country_code: countryCode,
+        type: 'smart_life'
+      };
+      
+      const usersHeaders = signTuyaRequest({
+        baseUrl,
+        path: usersPath,
+        method: 'POST',
+        body: usersBody,
+        accessToken: appToken
       });
+      
+      const usersResp = await axios.post(
+        baseUrl + usersPath,
+        usersBody,
+        { headers: usersHeaders }
+      );
+      
+      if (!usersResp.data.success) {
+        throw new Error(usersResp.data.msg || 'Login failed');
+      }
+      
+      const result = usersResp.data.result;
+      userSessions.set(req.sessionID, {
+        accessToken: result.access_token,
+        refreshToken: result.refresh_token,
+        uid: result.uid,
+        username
+      });
+      
+      return res.json({ success: true, uid: result.uid });
     }
-
-    const { access_token, refresh_token, uid, expire_time } = out.result;
+    
+    const result = loginResp.data.result;
     userSessions.set(req.sessionID, {
-      accessToken: access_token,
-      refreshToken: refresh_token,
-      uid,
-      expiresAt: Date.now() + (expire_time * 1000),
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token, 
+      uid: result.uid,
       username
     });
-    req.session.authenticated = true;
-
-    console.log('[LOGIN success]', out.label, { uid });
-    res.json({ success: true, uid, message: 'Login successful' });
+    
+    res.json({ success: true, uid: result.uid });
+    
   } catch (error) {
-    console.error('Login error:', error.data || error.message);
+    console.error('Login error:', error.response?.data);
     res.status(400).json({
       success: false,
-      error: error.data?.msg || error.message || 'Login failed'
+      error: error.response?.data?.msg || error.message
     });
   }
 });
-
 
 /**
  * POST /api/discover
