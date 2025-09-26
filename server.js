@@ -127,8 +127,8 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/debug-oauth', (req, res) => {
   res.json({
-    appClientId_len: (process.env.TUYA_APP_CLIENT_ID || '').length,     // APP (OAuth)
-    cloudClientId_len: (process.env.TUYA_CLIENT_ID || '').length,       // Cloud (devices)
+    appClientId_len: (process.env.TUYA_APP_CLIENT_ID || '').length,
+    cloudClientId_len: (process.env.TUYA_CLIENT_ID || '').length,
     baseUrl: process.env.TUYA_BASE_URL,
     appUrl: process.env.APP_URL || 'not set',
     redirectUri: `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`,
@@ -136,27 +136,35 @@ app.get('/api/debug-oauth', (req, res) => {
   });
 });
 
-// --- OAuth start (EU H5) ---
+/** -------------------------
+ *  OAuth (H5) start + callback - UPDATED WITH FIXES
+ *  ------------------------- */
+
+// Start OAuth - UPDATED with Smart Life parameters
 app.get('/api/smart-life-auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   req.session.oauthState = state;
 
-  // Use the H5 Page base Tuya showed you (yours is app-h5.iot320.com/d/login)
   const h5Base = process.env.TUYA_H5_LOGIN_BASE || 'https://app-h5.iot320.com/d/login';
-  const appClientId = process.env.TUYA_APP_CLIENT_ID; // App Authorization "Access ID"
-  const redirectUri = `${process.env.APP_URL}/api/auth-callback`;
+  const appClientId = process.env.TUYA_APP_CLIENT_ID;
+  const redirectUri = `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`;
   const schema = process.env.TUYA_SCHEMA || 'smartlife';
 
+  // UPDATED: Added parameters to specify Smart Life for "Others" authorization
   const url =
     `${h5Base}?client_id=${encodeURIComponent(appClientId)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&schema=${encodeURIComponent(schema)}` +
-    `&state=${encodeURIComponent(state)}`;
+    `&state=${encodeURIComponent(state)}` +
+    `&app_code=smartlife` +     // Tells Tuya to use Smart Life
+    `&platform=smartlife` +      // Populates the empty dropdown
+    `&app_type=smartlife`;       // Additional parameter for redundancy
 
   console.log('[OAUTH] redirect ->', url);
   res.redirect(url);
 });
 
+// OAuth callback - UPDATED with correct grant_type
 app.get('/api/auth-callback', async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -165,11 +173,11 @@ app.get('/api/auth-callback', async (req, res) => {
       throw new Error('state_mismatch');
     }
 
-    // Exchange code for user token (OAuth)
+    // UPDATED: Changed grant_type from 2 to 3 for OAuth code exchange
     const base = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
-    const path = `/v1.0/token?grant_type=2&code=${encodeURIComponent(code)}`;
+    const path = `/v1.0/token?grant_type=3&code=${encodeURIComponent(code)}`;
 
-    // IMPORTANT: sign with your **App Authorization** keys
+    // Sign with App Authorization keys
     const headers = signWithAppKey(path);
 
     const r = await axios.get(base + path, { headers, timeout: 10000 });
@@ -188,80 +196,12 @@ app.get('/api/auth-callback', async (req, res) => {
     req.session.authenticated = true;
     console.log('[OAUTH] success uid:', uid);
 
-    // Your React app watches for ?auth=success and then calls /api/discover
     res.redirect('/?auth=success');
   } catch (e) {
     console.error('[OAUTH] callback error:', e.response?.data || e.message);
     res.redirect('/?auth=failed&error=' + encodeURIComponent(e.message));
   }
 });
-// --- OAuth end ---
-
-
-/** -------------------------
- *  OAuth (H5) start + callback
- *  ------------------------- */
-
-
-// Start OAuth (EU) -> Tuya H5 login page
-/*/**
-app.get('/api/smart-life-auth', (req, res) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.oauthState = state;
-
-  const appClientId = process.env.TUYA_APP_CLIENT_ID; // APP key
-  const redirectUri = encodeURIComponent(`${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`);
-  const schema = encodeURIComponent(process.env.TUYA_SCHEMA || 'smartlife');
-
-  // Prefer the H5 domain Tuya showed you; fallback to openapi H5
-  const h5Base = process.env.TUYA_H5_LOGIN_BASE || 'https://openapi.tuyaeu.com/h5/oauth/authorize';
-
-  const url = `${h5Base}?client_id=${appClientId}&response_type=code&redirect_uri=${redirectUri}&schema=${schema}&state=${state}`;
-  console.log('[OAUTH] redirect ->', url);
-  res.redirect(url);
-});
-
-// OAuth callback: exchange code -> user token (EU)
-app.get('/api/auth-callback', async (req, res) => {
-  try {
-    const { code, state } = req.query;
-    if (!code) {
-      console.error('[OAUTH] missing code in callback');
-      return res.redirect('/?auth=failed&error=missing_code');
-    }
-    if (req.session.oauthState && state && state !== req.session.oauthState) {
-      console.error('[OAUTH] state mismatch');
-      return res.redirect('/?auth=failed&error=state_mismatch');
-    }
-
-    const base = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
-    const path = `/v1.0/authorize_token?grant_type=3&code=${encodeURIComponent(code)}`;
-    const headers = signWithAppKey(path);
-
-    const r = await axios.get(base + path, { headers, timeout: 10000 });
-    if (!r.data?.success) {
-      console.error('[OAUTH] token exchange failed:', r.data);
-      return res.redirect('/?auth=failed&error=' + encodeURIComponent(r.data?.msg || 'token_exchange_failed'));
-    }
-
-    const { access_token, refresh_token, uid, expire_time } = r.data.result;
-
-    userSessions.set(req.sessionID, {
-      accessToken: access_token,
-      refreshToken: refresh_token,
-      uid,
-      expiresAt: Date.now() + (expire_time * 1000)
-    });
-    req.session.authenticated = true;
-
-    console.log('[OAUTH] success for uid:', uid);
-    res.redirect('/?auth=success'); // React checks this and calls /api/discover
-  } catch (e) {
-    console.error('[OAUTH] callback error:', e.response?.data || e.message);
-    res.redirect('/?auth=failed&error=' + encodeURIComponent(e.message));
-  }
-});
- */
 
 /** -------------------------
  *  Devices: discover & trigger
