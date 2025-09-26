@@ -136,11 +136,75 @@ app.get('/api/debug-oauth', (req, res) => {
   });
 });
 
+// --- OAuth start (EU H5) ---
+app.get('/api/smart-life-auth', (req, res) => {
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.oauthState = state;
+
+  // Use the H5 Page base Tuya showed you (yours is app-h5.iot320.com/d/login)
+  const h5Base = process.env.TUYA_H5_LOGIN_BASE || 'https://app-h5.iot320.com/d/login';
+  const appClientId = process.env.TUYA_APP_CLIENT_ID; // App Authorization "Access ID"
+  const redirectUri = `${process.env.APP_URL}/api/auth-callback`;
+  const schema = process.env.TUYA_SCHEMA || 'smartlife';
+
+  const url =
+    `${h5Base}?client_id=${encodeURIComponent(appClientId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&schema=${encodeURIComponent(schema)}` +
+    `&state=${encodeURIComponent(state)}`;
+
+  console.log('[OAUTH] redirect ->', url);
+  res.redirect(url);
+});
+
+app.get('/api/auth-callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code) throw new Error('missing_code');
+    if (req.session.oauthState && state && state !== req.session.oauthState) {
+      throw new Error('state_mismatch');
+    }
+
+    // Exchange code for user token (OAuth)
+    const base = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
+    const path = `/v1.0/token?grant_type=2&code=${encodeURIComponent(code)}`;
+
+    // IMPORTANT: sign with your **App Authorization** keys
+    const headers = signWithAppKey(path);
+
+    const r = await axios.get(base + path, { headers, timeout: 10000 });
+    if (!r.data?.success) {
+      console.error('[OAUTH] token exchange failed:', r.data);
+      return res.redirect('/?auth=failed&error=' + encodeURIComponent(r.data?.msg || 'token_exchange_failed'));
+    }
+
+    const { access_token, refresh_token, uid, expire_time } = r.data.result;
+    userSessions.set(req.sessionID, {
+      accessToken: access_token,
+      refreshToken: refresh_token,
+      uid,
+      expiresAt: Date.now() + expire_time * 1000
+    });
+    req.session.authenticated = true;
+    console.log('[OAUTH] success uid:', uid);
+
+    // Your React app watches for ?auth=success and then calls /api/discover
+    res.redirect('/?auth=success');
+  } catch (e) {
+    console.error('[OAUTH] callback error:', e.response?.data || e.message);
+    res.redirect('/?auth=failed&error=' + encodeURIComponent(e.message));
+  }
+});
+// --- OAuth end ---
+
+
 /** -------------------------
  *  OAuth (H5) start + callback
  *  ------------------------- */
 
+
 // Start OAuth (EU) -> Tuya H5 login page
+/*/**
 app.get('/api/smart-life-auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   req.session.oauthState = state;
@@ -197,6 +261,7 @@ app.get('/api/auth-callback', async (req, res) => {
     res.redirect('/?auth=failed&error=' + encodeURIComponent(e.message));
   }
 });
+ */
 
 /** -------------------------
  *  Devices: discover & trigger
