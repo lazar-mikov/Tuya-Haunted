@@ -121,69 +121,76 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ success: false, error: 'username and password required' });
     }
 
-    const baseUrl = process.env.TUYA_BASE_URL;
+    const baseUrl = process.env.TUYA_BASE_URL; // e.g. https://openapi.tuyaeu.com
     const loginPath = '/v1.0/iot-03/users/login';
-    const passwordSha = crypto.createHash('sha256').update(password, 'utf8').digest('hex'); // SHA-256 lowercase (Tuya requirement)
 
-    const isEmail = String(username).includes('@');
+    const sha = crypto.createHash('sha256').update(password, 'utf8').digest('hex'); // lowercase
+    const asEmail = String(username).includes('@');
 
-    const attempt = async (body) => {
-      const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // no accessToken
+    // Build the 4 variants we’ll try in order (most common first)
+    const attempts = [
+      { label: 'A: email + SHA256, no country_code', body: { username, password: sha, schema }, cond: asEmail },
+      { label: 'B: email + SHA256, with country_code', body: { username, password: sha, schema, country_code: String(countryCode) }, cond: asEmail },
+      { label: 'C: email + PLAINTEXT, no country_code', body: { username, password, schema }, cond: asEmail },
+      { label: 'D: email + PLAINTEXT, with country_code', body: { username, password, schema, country_code: String(countryCode) }, cond: asEmail },
+      // Phone login path (if username is not an email)
+      { label: 'E: phone + SHA256 + country_code', body: { username, password: sha, schema, country_code: String(countryCode) }, cond: !asEmail },
+      { label: 'F: phone + PLAINTEXT + country_code', body: { username, password, schema, country_code: String(countryCode) }, cond: !asEmail },
+    ].filter(x => x.cond);
+
+    const tryOnce = async (body, label) => {
+      const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // <- your existing signer
       const r = await axios.post(baseUrl + loginPath, body, { headers, timeout: 10000 });
       if (!r.data?.success) {
-        const msg = r.data?.msg || 'Login failed';
-        const code = r.data?.code;
-        const err = new Error(msg);
-        err.code = code;
-        err.data = r.data;
-        throw err;
+        const e = new Error(r.data?.msg || 'Login failed');
+        e.code = r.data?.code;
+        e.data = r.data;
+        throw e;
       }
-      return r.data.result;
+      return { result: r.data.result, label };
     };
 
-    let result;
-    if (isEmail) {
-      // 1) Try WITHOUT country_code
-      const body1 = { username, password: passwordSha, schema };
-      console.log('[LOGIN] email attempt A', { schema, country_code: '(omitted)' });
-
+    let out = null, lastErr = null;
+    for (const a of attempts) {
       try {
-        result = await attempt(body1);
-      } catch (e1) {
-        console.warn('[LOGIN] A failed -> retrying with country_code', e1.code, e1.message);
-        // 2) Try WITH country_code
-        const body2 = { username, password: passwordSha, schema, country_code: String(countryCode) };
-        result = await attempt(body2);
+        console.log('[LOGIN attempt]', a.label, { schema, cc: a.body.country_code ? 'set' : 'omitted' });
+        out = await tryOnce(a.body, a.label);
+        break;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[LOGIN failed]', a.label, e.code, e.message);
       }
-    } else {
-      // Phone login: always include country_code
-      const body = { username, password: passwordSha, schema, country_code: String(countryCode) };
-      console.log('[LOGIN] phone attempt', { schema, country_code: String(countryCode) });
-      result = await attempt(body);
     }
 
-    const { access_token, refresh_token, uid, expire_time } = result;
+    if (!out) {
+      return res.status(400).json({
+        success: false,
+        error: lastErr?.data?.msg || lastErr?.message || 'Login failed',
+        code: lastErr?.code || null
+      });
+    }
 
-    const sessionData = {
+    const { access_token, refresh_token, uid, expire_time } = out.result;
+    userSessions.set(req.sessionID, {
       accessToken: access_token,
       refreshToken: refresh_token,
       uid,
       expiresAt: Date.now() + (expire_time * 1000),
       username
-    };
-    userSessions.set(req.sessionID, sessionData);
+    });
     req.session.authenticated = true;
 
+    console.log('[LOGIN success]', out.label, { uid });
     res.json({ success: true, uid, message: 'Login successful' });
   } catch (error) {
     console.error('Login error:', error.data || error.message);
     res.status(400).json({
       success: false,
-      error: error.data?.msg || error.message || 'Login failed',
-      code: error.code || null
+      error: error.data?.msg || error.message || 'Login failed'
     });
   }
 });
+
 
 /**
  * POST /api/discover
