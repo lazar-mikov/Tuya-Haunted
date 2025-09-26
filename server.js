@@ -124,30 +124,30 @@ app.post('/api/login', async (req, res) => {
     const baseUrl = process.env.TUYA_BASE_URL;
     const loginPath = '/v1.0/iot-03/users/login';
 
-    // Tuya expects SHA256(password) in lowercase hex
+    // Tuya requires SHA-256 lowercase hex
     const passwordSha = crypto.createHash('sha256').update(password, 'utf8').digest('hex');
+
+    // If username looks like an email, DO NOT send country_code
+    const isEmail = String(username).includes('@');
 
     const body = {
       username,
       password: passwordSha,
-      country_code: String(countryCode),
       schema
     };
+    if (!isEmail) {
+      body.country_code = String(countryCode); // only for phone number logins
+    }
 
-    const headers = signTuyaRequest({
-      baseUrl,
-      path: loginPath,
-      method: 'POST',
-      body
-      // no accessToken here
-    });
+    // (Optional) safe debug — remove later
+    console.log('[LOGIN]', { isEmail, schema, country_code: isEmail ? '(omitted)' : String(countryCode) });
 
+    const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // no access_token
     const r = await axios.post(baseUrl + loginPath, body, { headers, timeout: 10000 });
 
     if (!r.data?.success) throw new Error(r.data?.msg || 'Login failed');
 
     const { access_token, refresh_token, uid, expire_time } = r.data.result;
-
     const sessionData = {
       accessToken: access_token,
       refreshToken: refresh_token,
@@ -155,7 +155,6 @@ app.post('/api/login', async (req, res) => {
       expiresAt: Date.now() + (expire_time * 1000),
       username
     };
-
     userSessions.set(req.sessionID, sessionData);
     req.session.authenticated = true;
 
