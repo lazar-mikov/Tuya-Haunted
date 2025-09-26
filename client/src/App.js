@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import LoginScreen from './components/LoginScreen';
 import DeviceList from './components/DeviceList';
 import EffectController from './components/EffectController';
+import tuyaService from './api/tuyaService'; // <-- default import (most common)
+
 import './App.css';
 
 function App() {
