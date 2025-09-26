@@ -7,18 +7,16 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const md5hex = (s = '') => crypto.createHash('md5').update(s, 'utf8').digest('hex');
-
 
 const app = express();
+app.set('trust proxy', 1); // required on Railway for secure session cookies
 
 /** -------------------------
- *  App middleware
+ *  Middleware
  *  ------------------------- */
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
@@ -39,51 +37,43 @@ app.use(session({
   }
 }));
 
-// Serve React app in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'client/build')));
-}
-
 /** -------------------------
  *  Session storage
  *  ------------------------- */
 const userSessions = new Map();
 
 /** -------------------------
- *  Tuya signing helpers (V2)
+ *  Tuya signing helpers
  *  ------------------------- */
 
 // sha256 hex helper
+const sha256hex = (s = '') => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
-
-// sha256 hex helper
-const sha256hex = (s = '') =>
-  crypto.createHash('sha256').update(s, 'utf8').digest('hex');
-
-// Build Tuya v2 stringToSign WITHOUT signed headers.
-// This intentionally puts a BLANK line for the headers section.
+// Build Tuya v2 stringToSign WITHOUT signed headers (blank line for headers)
 function buildStringToSign(method, pathWithQuery, bodyObj) {
   const httpMethod = method.toUpperCase();
   const bodyStr = bodyObj && Object.keys(bodyObj).length ? JSON.stringify(bodyObj) : '';
   const contentSha256 = sha256hex(bodyStr);
-  // Join parts with '\n'. The empty string below becomes a blank line.
   return [httpMethod, contentSha256, '', pathWithQuery].join('\n');
 }
 
+/**
+ * Sign with **cloud project** key/secret (device APIs)
+ */
 function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessToken = '' }) {
-  const t = Date.now().toString();          // 13-digit ms timestamp
+  const t = Date.now().toString();
   const nonce = crypto.randomUUID();
-  const client_id = process.env.TUYA_CLIENT_ID;
-  const secret = process.env.TUYA_CLIENT_SECRET;
+  const client_id = process.env.TUYA_CLIENT_ID;      // CLOUD key
+  const secret = process.env.TUYA_CLIENT_SECRET;     // CLOUD secret
 
-  // Only sign PATH + QUERY (no host)
-  const u = new URL(path, baseUrl);;
+  const u = new URL(path, baseUrl);
   const pathWithQuery = u.pathname + (u.search || '');
 
   const stringToSign = buildStringToSign(method, pathWithQuery, body || {});
   const preSign = client_id + (accessToken || '') + t + nonce + stringToSign;
 
-  const sign = crypto.createHmac('sha256', secret).update(preSign, 'utf8').digest('hex').toUpperCase();
+  const sign = crypto.createHmac('sha256', secret)
+    .update(preSign, 'utf8').digest('hex').toUpperCase();
 
   const headers = {
     'client_id': client_id,
@@ -98,204 +88,121 @@ function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessTok
   return headers;
 }
 
+/**
+ * Sign with **APP** key/secret (OAuth token exchange)
+ */
+function signWithAppKey(path) {
+  const t = Date.now().toString();
+  const nonce = crypto.randomUUID();
+  const contentHash = crypto.createHash('sha256').update('', 'utf8').digest('hex');
+  const stringToSign = ['GET', contentHash, '', path].join('\n');
+
+  const appClientId = process.env.TUYA_APP_CLIENT_ID;       // APP key
+  const appSecret   = process.env.TUYA_APP_CLIENT_SECRET;   // APP secret
+
+  const preSign = appClientId + t + nonce + stringToSign;
+  const sign = crypto.createHmac('sha256', appSecret)
+    .update(preSign, 'utf8').digest('hex').toUpperCase();
+
+  return {
+    'client_id': appClientId,
+    'sign': sign,
+    't': t,
+    'nonce': nonce,
+    'sign_method': 'HMAC-SHA256',
+    'Content-Type': 'application/json'
+  };
+}
 
 /** -------------------------
- *  API routes
+ *  Health & debug
  *  ------------------------- */
-
-/**
- * POST /api/login
- * Body: { username, password, countryCode?, schema? }
- *
- * - Hashes password (SHA256 lowercase) as Tuya requires
- * - Signs request using v2 signing
- */
-/** 
-app.post('/api/login', async (req, res) => {
-  try {
-    const { username, password, countryCode = '49' } = req.body;
-    
-    const baseUrl = process.env.TUYA_BASE_URL;
-    
-    // THIS IS THE ACTUAL WORKING ENDPOINT FOR SMART LIFE USERS
-    const loginPath = '/v1.0/iot-01/associated-users/user-login';
-    
-    const loginBody = {
-      username: username,
-      password: password,  // Send plaintext
-      country_code: countryCode,
-      schema: 'smart-life'  // Note the hyphen
-    };
-    
-    // Get app token first
-    const tokenPath = '/v1.0/token?grant_type=1';
-    const tokenHeaders = signTuyaRequest({
-      baseUrl,
-      path: tokenPath,
-      method: 'GET'
-    });
-    
-    const tokenResp = await axios.get(baseUrl + tokenPath, { headers: tokenHeaders });
-    const appToken = tokenResp.data.result.access_token;
-    
-    // Now login with app token
-    const loginHeaders = signTuyaRequest({
-      baseUrl,
-      path: loginPath,
-      method: 'POST',
-      body: loginBody,
-      accessToken: appToken
-    });
-    
-    const response = await axios.post(
-      baseUrl + loginPath,
-      loginBody,
-      { headers: loginHeaders }
-    );
-    
-    if (!response.data.success) {
-      throw new Error(response.data.msg || 'Login failed');
-    }
-    
-    const { uid, token } = response.data.result;
-    
-    userSessions.set(req.sessionID, {
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token,
-      uid: uid,
-      username: username
-    });
-    
-    res.json({ success: true, uid });
-    
-  } catch (error) {
-    console.error('Login error:', error.response?.data);
-    
-    // If that fails, users need to use OAuth
-    if (error.response?.status === 404) {
-      return res.status(400).json({
-        success: false,
-        error: 'Direct login not available. Users must authorize through Smart Life app.',
-        useOAuth: true
-      });
-    }
-    
-    res.status(400).json({
-      success: false,
-      error: error.response?.data?.msg || error.message
-    });
-  }
-});
-*/
-/**
- * POST /api/discover
- * Uses users/{uid}/devices, signed with access_token
- */
-
-// server.js - OAuth endpoints
-app.get('/api/smart-life-auth', (req, res) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.authState = state;
-  
-  // Build Tuya OAuth URL
-  const oauthUrl = new URL('https://openapi.tuyaeu.com/oauth/authorize');
-  oauthUrl.searchParams.set('client_id', process.env.TUYA_CLIENT_ID);
-  oauthUrl.searchParams.set('response_type', 'code');
-  oauthUrl.searchParams.set('redirect_uri', `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`);
-  oauthUrl.searchParams.set('state', state);
-  
-  console.log('Redirecting to:', oauthUrl.toString());
-  res.redirect(oauthUrl.toString());
-});
-
-app.get('/api/auth-callback', async (req, res) => {
-  try {
-    const { code, state } = req.query;
-    
-    if (!code) {
-      throw new Error('No authorization code received');
-    }
-    
-    // Exchange code for token
-    const baseUrl = process.env.TUYA_BASE_URL;
-    const tokenPath = `/v1.0/token?code=${code}&grant_type=authorization_code`;
-    
-    const headers = signTuyaRequest({
-      baseUrl,
-      path: tokenPath,
-      method: 'GET'
-    });
-    
-    const response = await axios.get(baseUrl + tokenPath, { headers });
-    
-    if (response.data.success) {
-      const { access_token, refresh_token, uid } = response.data.result;
-      
-      userSessions.set(req.sessionID, {
-        accessToken: access_token,
-        refreshToken: refresh_token,
-        uid: uid
-      });
-      
-      req.session.authenticated = true;
-      
-      // Redirect to React app with success
-      res.redirect('/?auth=success');
-    } else {
-      throw new Error(response.data.msg);
-    }
-  } catch (error) {
-    console.error('OAuth callback error:', error);
-    res.redirect('/?auth=failed&error=' + encodeURIComponent(error.message));
-  }
-});
-
-// Handle callback
-app.get('/api/auth-callback', async (req, res) => {
-  const { code, state } = req.query;
-  
-  if (state !== req.session.authState) {
-    return res.redirect('/?error=invalid_state');
-  }
-  
-  try {
-    const baseUrl = process.env.TUYA_BASE_URL;
-    const tokenPath = `/v1.0/oauth/access_token?code=${code}&grant_type=authorization_code`;
-    
-    const headers = signTuyaRequest({
-      baseUrl,
-      path: tokenPath,
-      method: 'GET'
-    });
-    
-    const response = await axios.get(baseUrl + tokenPath, { headers });
-    
-    if (response.data.success) {
-      const { access_token, refresh_token, uid } = response.data.result;
-      
-      userSessions.set(req.sessionID, {
-        accessToken: access_token,
-        refreshToken: refresh_token,
-        uid: uid
-      });
-      
-      // Redirect back to your app
-      res.redirect('/?login=success');
-    }
-  } catch (error) {
-    res.redirect('/?error=auth_failed');
-  }
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    sessions: userSessions.size,
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
 app.get('/api/debug-oauth', (req, res) => {
   res.json({
-    clientId: process.env.TUYA_CLIENT_ID,
+    appClientId_len: (process.env.TUYA_APP_CLIENT_ID || '').length,     // APP (OAuth)
+    cloudClientId_len: (process.env.TUYA_CLIENT_ID || '').length,       // Cloud (devices)
     baseUrl: process.env.TUYA_BASE_URL,
     appUrl: process.env.APP_URL || 'not set',
-    redirectUri: `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`
+    redirectUri: `${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`,
+    h5Base: process.env.TUYA_H5_LOGIN_BASE || 'https://openapi.tuyaeu.com/h5/oauth/authorize',
   });
 });
 
+/** -------------------------
+ *  OAuth (H5) start + callback
+ *  ------------------------- */
+
+// Start OAuth (EU) -> Tuya H5 login page
+app.get('/api/smart-life-auth', (req, res) => {
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.oauthState = state;
+
+  const appClientId = process.env.TUYA_APP_CLIENT_ID; // APP key
+  const redirectUri = encodeURIComponent(`${process.env.APP_URL || 'https://tuya-haunted-production.up.railway.app'}/api/auth-callback`);
+  const schema = encodeURIComponent(process.env.TUYA_SCHEMA || 'smartlife');
+
+  // Prefer the H5 domain Tuya showed you; fallback to openapi H5
+  const h5Base = process.env.TUYA_H5_LOGIN_BASE || 'https://openapi.tuyaeu.com/h5/oauth/authorize';
+
+  const url = `${h5Base}?client_id=${appClientId}&response_type=code&redirect_uri=${redirectUri}&schema=${schema}&state=${state}`;
+  console.log('[OAUTH] redirect ->', url);
+  res.redirect(url);
+});
+
+// OAuth callback: exchange code -> user token (EU)
+app.get('/api/auth-callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code) {
+      console.error('[OAUTH] missing code in callback');
+      return res.redirect('/?auth=failed&error=missing_code');
+    }
+    if (req.session.oauthState && state && state !== req.session.oauthState) {
+      console.error('[OAUTH] state mismatch');
+      return res.redirect('/?auth=failed&error=state_mismatch');
+    }
+
+    const base = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
+    const path = `/v1.0/authorize_token?grant_type=3&code=${encodeURIComponent(code)}`;
+    const headers = signWithAppKey(path);
+
+    const r = await axios.get(base + path, { headers, timeout: 10000 });
+    if (!r.data?.success) {
+      console.error('[OAUTH] token exchange failed:', r.data);
+      return res.redirect('/?auth=failed&error=' + encodeURIComponent(r.data?.msg || 'token_exchange_failed'));
+    }
+
+    const { access_token, refresh_token, uid, expire_time } = r.data.result;
+
+    userSessions.set(req.sessionID, {
+      accessToken: access_token,
+      refreshToken: refresh_token,
+      uid,
+      expiresAt: Date.now() + (expire_time * 1000)
+    });
+    req.session.authenticated = true;
+
+    console.log('[OAUTH] success for uid:', uid);
+    res.redirect('/?auth=success'); // React checks this and calls /api/discover
+  } catch (e) {
+    console.error('[OAUTH] callback error:', e.response?.data || e.message);
+    res.redirect('/?auth=failed&error=' + encodeURIComponent(e.message));
+  }
+});
+
+/** -------------------------
+ *  Devices: discover & trigger
+ *  ------------------------- */
+
+// Discover devices for the logged-in user
 app.post('/api/discover', async (req, res) => {
   try {
     const sessionData = userSessions.get(req.sessionID);
@@ -303,7 +210,7 @@ app.post('/api/discover', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Not authenticated. Please login first.' });
     }
 
-    const baseUrl = process.env.TUYA_BASE_URL;
+    const baseUrl = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
     const devicesPath = `/v1.0/users/${sessionData.uid}/devices`;
 
     const headers = signTuyaRequest({
@@ -314,7 +221,6 @@ app.post('/api/discover', async (req, res) => {
     });
 
     const response = await axios.get(baseUrl + devicesPath, { headers, timeout: 10000 });
-
     if (!response.data.success) throw new Error(response.data.msg || 'Failed to get devices');
 
     const devices = response.data.result || [];
@@ -340,17 +246,13 @@ app.post('/api/discover', async (req, res) => {
     userSessions.set(req.sessionID, sessionData);
 
     res.json({ success: true, devices: formattedDevices, total: formattedDevices.length });
-
   } catch (error) {
     console.error('Discovery error:', error.response?.data || error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/**
- * POST /api/trigger
- * Sends commands to all discovered devices (signed with access_token)
- */
+// Send effect commands to all discovered devices
 app.post('/api/trigger', async (req, res) => {
   try {
     const { effect } = req.body;
@@ -370,7 +272,6 @@ app.post('/api/trigger', async (req, res) => {
       'flash-red': [
         { code: 'switch_led', value: true },
         { code: 'work_mode', value: 'colour' },
-        // Some devices expect object, some expect stringified JSON; keeping your version
         { code: 'colour_data_v2', value: JSON.stringify({ h: 0, s: 1000, v: 1000 }) }
       ],
       'reset': [
@@ -394,9 +295,9 @@ app.post('/api/trigger', async (req, res) => {
     if (effect === 'flicker') {
       for (let i = 0; i < 5; i++) {
         await controlAllDevices(sessionData, [{ code: 'switch_led', value: false }]);
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 120));
         await controlAllDevices(sessionData, [{ code: 'switch_led', value: true }]);
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 120));
       }
       return res.json({ success: true, effect: 'flicker' });
     }
@@ -410,7 +311,6 @@ app.post('/api/trigger', async (req, res) => {
       devicesTriggered: successCount,
       totalDevices: sessionData.devices?.length || 0
     });
-
   } catch (error) {
     console.error('Trigger error:', error.message);
     res.status(500).json({ success: false, error: error.message });
@@ -419,7 +319,7 @@ app.post('/api/trigger', async (req, res) => {
 
 async function controlAllDevices(sessionData, commands) {
   const devices = sessionData.devices || [];
-  const baseUrl = process.env.TUYA_BASE_URL;
+  const baseUrl = process.env.TUYA_BASE_URL || 'https://openapi.tuyaeu.com';
 
   const promises = devices.map(async (device) => {
     if (!device.online) return { success: false, deviceId: device.id };
@@ -436,9 +336,8 @@ async function controlAllDevices(sessionData, commands) {
         accessToken: sessionData.accessToken
       });
 
-      const response = await axios.post(baseUrl + controlPath, controlBody, { headers, timeout: 3000 });
+      const response = await axios.post(baseUrl + controlPath, controlBody, { headers, timeout: 4000 });
       return { success: response.data.success, deviceId: device.id };
-
     } catch (error) {
       return { success: false, deviceId: device.id, error: error.message };
     }
@@ -447,64 +346,19 @@ async function controlAllDevices(sessionData, commands) {
   return Promise.all(promises);
 }
 
-app.post('/api/debug-login', async (req, res) => {
-  const { username, password } = req.body;
-  
-  const sha256 = crypto.createHash('sha256').update(password).digest('hex');
-  const md5 = crypto.createHash('md5').update(password).digest('hex');
-  
-  res.json({
-    env: {
-      baseUrl: process.env.TUYA_BASE_URL,
-      hasClientId: !!process.env.TUYA_CLIENT_ID,
-      clientIdStart: process.env.TUYA_CLIENT_ID?.substring(0, 4),
-      countryCode: process.env.TUYA_COUNTRY_CODE
-    },
-    attempts: {
-      username,
-      sha256Hash: sha256.substring(0, 8) + '...',
-      md5Hash: md5.substring(0, 8) + '...',
-      isEmail: username.includes('@')
-    }
-  });
-});
-
 /** -------------------------
- *  Health & debug
- *  ------------------------- */
-app.get('/api/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    sessions: userSessions.size,
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
-
-// Optional: quick signer sanity-check
-app.get('/api/token-test', async (_req, res) => {
-  try {
-    const baseUrl = process.env.TUYA_BASE_URL;
-    const p = '/v1.0/token?grant_type=1';
-    const headers = signTuyaRequest({ baseUrl, path: p, method: 'GET' });
-    const r = await axios.get(baseUrl + p, { headers, timeout: 10000 });
-    res.json(r.data);
-  } catch (e) {
-    res.status(500).json({ ok: false, err: e.response?.data || e.message });
-  }
-});
-
-
-
-
-/** -------------------------
- *  SPA catch-all (prod)
+ *  Static (must be last in production)
  *  ------------------------- */
 if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'client', 'build')));
   app.get('*', (_req, res) => {
-    res.sendFile(path.join(__dirname, 'client/build/index.html'));
+    res.sendFile(path.join(__dirname, 'client', 'build', 'index.html'));
   });
 }
 
+/** -------------------------
+ *  Start server
+ *  ------------------------- */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🎃 Tuya Haunted Lights running on port ${PORT}`);
