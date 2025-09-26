@@ -13,25 +13,28 @@ const LoginScreen = ({ onLoginSuccess }) => {
     const [error, setError] = useState('');
 
     const handleLogin = async (e) => {
-        e.preventDefault();
+      //  e.preventDefault();
         
-        if (!username || !password) {
-            setError('Please enter your Smart Life credentials');
-            return;
-        }
+       // if (!username || !password) {
+      //      setError('Please enter your Smart Life credentials');
+     //       return;
+     //   }
 
-        setLoading(true);
-        setError('');
+     //   setLoading(true);
+     //   setError('');
         
-        try {
-            await tuyaService.login(username, password, countryCode, appType);
-            const devices = await tuyaService.discoverDevices();
-            onLoginSuccess(devices);
-        } catch (error) {
-            setError(error.message || 'Login failed. Please check your credentials.');
-        } finally {
-            setLoading(false);
-        }
+     //   try {
+      //      await tuyaService.login(username, password, countryCode, appType);
+      //      const devices = await tuyaService.discoverDevices();
+      //      onLoginSuccess(devices);
+     //   } catch (error) {
+     //       setError(error.message || 'Login failed. Please check your credentials.');
+     //   } finally {
+    //        setLoading(false);
+       // }
+
+         window.location.href = '/api/smart-life-auth';
+
     };
 
     return (

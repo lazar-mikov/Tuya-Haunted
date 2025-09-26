@@ -110,6 +110,7 @@ function signTuyaRequest({ baseUrl, path, method = 'GET', body = null, accessTok
  * - Hashes password (SHA256 lowercase) as Tuya requires
  * - Signs request using v2 signing
  */
+/** 
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password, countryCode = '49' } = req.body;
@@ -185,11 +186,68 @@ app.post('/api/login', async (req, res) => {
     });
   }
 });
-
+*/
 /**
  * POST /api/discover
  * Uses users/{uid}/devices, signed with access_token
  */
+
+// Generate auth URL for users
+app.get('/api/smart-life-auth', (req, res) => {
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.authState = state;
+  
+  const params = new URLSearchParams({
+    client_id: process.env.TUYA_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: 'https://tuya-haunted-production.up.railway.app/api/auth-callback',
+    state: state,
+    schema: 'smart-life'
+  });
+  
+  // Redirect to Tuya's auth page
+  res.redirect(`https://openapi.tuyaeu.com/oauth/authorize?${params}`);
+});
+
+// Handle callback
+app.get('/api/auth-callback', async (req, res) => {
+  const { code, state } = req.query;
+  
+  if (state !== req.session.authState) {
+    return res.redirect('/?error=invalid_state');
+  }
+  
+  try {
+    const baseUrl = process.env.TUYA_BASE_URL;
+    const tokenPath = `/v1.0/oauth/access_token?code=${code}&grant_type=authorization_code`;
+    
+    const headers = signTuyaRequest({
+      baseUrl,
+      path: tokenPath,
+      method: 'GET'
+    });
+    
+    const response = await axios.get(baseUrl + tokenPath, { headers });
+    
+    if (response.data.success) {
+      const { access_token, refresh_token, uid } = response.data.result;
+      
+      userSessions.set(req.sessionID, {
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        uid: uid
+      });
+      
+      // Redirect back to your app
+      res.redirect('/?login=success');
+    }
+  } catch (error) {
+    res.redirect('/?error=auth_failed');
+  }
+});
+
+
+
 app.post('/api/discover', async (req, res) => {
   try {
     const sessionData = userSessions.get(req.sessionID);
