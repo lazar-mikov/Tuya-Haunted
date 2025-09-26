@@ -347,9 +347,6 @@ app.get('/api/token-test', async (_req, res) => {
   }
 });
 
-console.log('[LOGIN] username:', String(username).slice(0,3) + '***',
-            'schema:', schema,
-            'country_code:', String(countryCode));
 
 
 
