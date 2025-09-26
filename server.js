@@ -123,31 +123,47 @@ app.post('/api/login', async (req, res) => {
 
     const baseUrl = process.env.TUYA_BASE_URL;
     const loginPath = '/v1.0/iot-03/users/login';
+    const passwordSha = crypto.createHash('sha256').update(password, 'utf8').digest('hex'); // SHA-256 lowercase (Tuya requirement)
 
-    // Tuya requires SHA-256 lowercase hex
-    const passwordSha = crypto.createHash('sha256').update(password, 'utf8').digest('hex');
-
-    // If username looks like an email, DO NOT send country_code
     const isEmail = String(username).includes('@');
 
-    const body = {
-      username,
-      password: passwordSha,
-      schema
+    const attempt = async (body) => {
+      const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // no accessToken
+      const r = await axios.post(baseUrl + loginPath, body, { headers, timeout: 10000 });
+      if (!r.data?.success) {
+        const msg = r.data?.msg || 'Login failed';
+        const code = r.data?.code;
+        const err = new Error(msg);
+        err.code = code;
+        err.data = r.data;
+        throw err;
+      }
+      return r.data.result;
     };
-    if (!isEmail) {
-      body.country_code = String(countryCode); // only for phone number logins
+
+    let result;
+    if (isEmail) {
+      // 1) Try WITHOUT country_code
+      const body1 = { username, password: passwordSha, schema };
+      console.log('[LOGIN] email attempt A', { schema, country_code: '(omitted)' });
+
+      try {
+        result = await attempt(body1);
+      } catch (e1) {
+        console.warn('[LOGIN] A failed -> retrying with country_code', e1.code, e1.message);
+        // 2) Try WITH country_code
+        const body2 = { username, password: passwordSha, schema, country_code: String(countryCode) };
+        result = await attempt(body2);
+      }
+    } else {
+      // Phone login: always include country_code
+      const body = { username, password: passwordSha, schema, country_code: String(countryCode) };
+      console.log('[LOGIN] phone attempt', { schema, country_code: String(countryCode) });
+      result = await attempt(body);
     }
 
-    // (Optional) safe debug — remove later
-    console.log('[LOGIN]', { isEmail, schema, country_code: isEmail ? '(omitted)' : String(countryCode) });
+    const { access_token, refresh_token, uid, expire_time } = result;
 
-    const headers = signTuyaRequest({ baseUrl, path: loginPath, method: 'POST', body }); // no access_token
-    const r = await axios.post(baseUrl + loginPath, body, { headers, timeout: 10000 });
-
-    if (!r.data?.success) throw new Error(r.data?.msg || 'Login failed');
-
-    const { access_token, refresh_token, uid, expire_time } = r.data.result;
     const sessionData = {
       accessToken: access_token,
       refreshToken: refresh_token,
@@ -160,10 +176,11 @@ app.post('/api/login', async (req, res) => {
 
     res.json({ success: true, uid, message: 'Login successful' });
   } catch (error) {
-    console.error('Login error:', error.response?.data || error.message);
+    console.error('Login error:', error.data || error.message);
     res.status(400).json({
       success: false,
-      error: error.response?.data?.msg || error.message || 'Login failed'
+      error: error.data?.msg || error.message || 'Login failed',
+      code: error.code || null
     });
   }
 });
