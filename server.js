@@ -116,7 +116,17 @@ app.post('/api/login', async (req, res) => {
     
     const baseUrl = process.env.TUYA_BASE_URL;
     
-    // Get app access token first
+    // THIS IS THE ACTUAL WORKING ENDPOINT FOR SMART LIFE USERS
+    const loginPath = '/v1.0/iot-01/associated-users/user-login';
+    
+    const loginBody = {
+      username: username,
+      password: password,  // Send plaintext
+      country_code: countryCode,
+      schema: 'smart-life'  // Note the hyphen
+    };
+    
+    // Get app token first
     const tokenPath = '/v1.0/token?grant_type=1';
     const tokenHeaders = signTuyaRequest({
       baseUrl,
@@ -125,86 +135,50 @@ app.post('/api/login', async (req, res) => {
     });
     
     const tokenResp = await axios.get(baseUrl + tokenPath, { headers: tokenHeaders });
-    if (!tokenResp.data.success) {
-      throw new Error('Failed to get app token');
-    }
-    
     const appToken = tokenResp.data.result.access_token;
     
-    // Use the HOME MANAGEMENT API (this is under Smart Home Basic Service)
-    const homePath = '/v1.0/home/login';
-    const loginBody = {
-      username,  // email or phone
-      password,  // plaintext - Tuya will hash it
-      country_code: countryCode,
-      application_name: 'smart_life'  // Critical for Smart Life users
-    };
-    
+    // Now login with app token
     const loginHeaders = signTuyaRequest({
       baseUrl,
-      path: homePath,
+      path: loginPath,
       method: 'POST',
       body: loginBody,
       accessToken: appToken
     });
     
-    const loginResp = await axios.post(
-      baseUrl + homePath,
+    const response = await axios.post(
+      baseUrl + loginPath,
       loginBody,
       { headers: loginHeaders }
     );
     
-    if (!loginResp.data.success) {
-      // If home/login fails, try users/login
-      const usersPath = '/v1.0/users/login';
-      const usersBody = {
-        username,
-        password,
-        country_code: countryCode,
-        type: 'smart_life'
-      };
-      
-      const usersHeaders = signTuyaRequest({
-        baseUrl,
-        path: usersPath,
-        method: 'POST',
-        body: usersBody,
-        accessToken: appToken
-      });
-      
-      const usersResp = await axios.post(
-        baseUrl + usersPath,
-        usersBody,
-        { headers: usersHeaders }
-      );
-      
-      if (!usersResp.data.success) {
-        throw new Error(usersResp.data.msg || 'Login failed');
-      }
-      
-      const result = usersResp.data.result;
-      userSessions.set(req.sessionID, {
-        accessToken: result.access_token,
-        refreshToken: result.refresh_token,
-        uid: result.uid,
-        username
-      });
-      
-      return res.json({ success: true, uid: result.uid });
+    if (!response.data.success) {
+      throw new Error(response.data.msg || 'Login failed');
     }
     
-    const result = loginResp.data.result;
+    const { uid, token } = response.data.result;
+    
     userSessions.set(req.sessionID, {
-      accessToken: result.access_token,
-      refreshToken: result.refresh_token, 
-      uid: result.uid,
-      username
+      accessToken: token.access_token,
+      refreshToken: token.refresh_token,
+      uid: uid,
+      username: username
     });
     
-    res.json({ success: true, uid: result.uid });
+    res.json({ success: true, uid });
     
   } catch (error) {
     console.error('Login error:', error.response?.data);
+    
+    // If that fails, users need to use OAuth
+    if (error.response?.status === 404) {
+      return res.status(400).json({
+        success: false,
+        error: 'Direct login not available. Users must authorize through Smart Life app.',
+        useOAuth: true
+      });
+    }
+    
     res.status(400).json({
       success: false,
       error: error.response?.data?.msg || error.message
